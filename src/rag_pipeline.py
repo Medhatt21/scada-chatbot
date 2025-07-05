@@ -206,7 +206,7 @@ class RAGPipeline:
     async def get_available_documents(self) -> List[Dict[str, Any]]:
         """Get list of available documents in the database."""
         try:
-            async with db_manager.async_session() as session:
+            async with db_manager.get_session() as session:
                 from sqlalchemy import text
                 result = await session.execute(
                     text("""
@@ -221,7 +221,8 @@ class RAGPipeline:
                         ORDER BY d.created_at DESC
                     """)
                 )
-                return [dict(row) for row in result.fetchall()]
+                rows = result.fetchall()
+                return [dict(row._mapping) for row in rows]
         except Exception as e:
             logger.error(f"Failed to get available documents: {e}")
             raise

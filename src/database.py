@@ -3,6 +3,7 @@
 import asyncio
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
+import threading
 
 import asyncpg
 import psycopg2
@@ -21,89 +22,133 @@ class DatabaseManager:
     def __init__(self):
         """Initialize database manager."""
         self.engine = create_engine(settings.database_url)
-        self.async_engine = create_async_engine(settings.async_database_url)
+        self.async_engine = create_async_engine(
+            settings.async_database_url,
+            pool_size=1,  # Reduce to single connection to avoid concurrency issues
+            max_overflow=0,  # No overflow connections
+            pool_pre_ping=True,
+            pool_recycle=3600
+        )
         self.async_session = sessionmaker(
             self.async_engine, class_=AsyncSession, expire_on_commit=False
         )
+        self._initialization_lock = None
+        self._initialized = False
+        self._session_lock = threading.Lock()
+        self._db_semaphore = None
+    
+    def _ensure_async_objects(self):
+        """Ensure async objects are created in the correct context."""
+        if self._initialization_lock is None:
+            self._initialization_lock = asyncio.Lock()
+        if self._db_semaphore is None:
+            self._db_semaphore = asyncio.Semaphore(1)
+    
+    @asynccontextmanager
+    async def get_session(self):
+        """Get a database session with proper error handling and concurrency control."""
+        self._ensure_async_objects()
+        async with self._db_semaphore:  # Ensure only one operation at a time
+            session = None
+            try:
+                await asyncio.sleep(0.01)  # Small delay to prevent race conditions
+                session = self.async_session()
+                yield session
+            except Exception as e:
+                if session:
+                    try:
+                        await session.rollback()
+                    except:
+                        pass
+                logger.error(f"Database session error: {e}")
+                raise
+            finally:
+                if session:
+                    try:
+                        await session.close()
+                    except:
+                        pass
     
     async def initialize_database(self) -> None:
         """Initialize database with required extensions and tables."""
-        try:
-            # Create database if it doesn't exist
-            await self._create_database_if_not_exists()
-            
-            # Initialize extensions and tables
-            async with self.async_engine.begin() as conn:
-                # Enable pgvector extension
-                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+        self._ensure_async_objects()
+        
+        # Use lock to prevent concurrent initialization
+        async with self._initialization_lock:
+            if self._initialized:
+                logger.info("Database already initialized, skipping...")
+                return
                 
-                # Note: pgai extension is not available in standard pgvector image
-                # If you have a custom image with pgai, uncomment the lines below:
-                # try:
-                #     await conn.execute(text("CREATE EXTENSION IF NOT EXISTS ai;"))
-                #     logger.info("pgai extension enabled")
-                # except Exception as e:
-                #     logger.warning(f"pgai extension not available: {e}")
+            try:
+                # Create database if it doesn't exist
+                await self._create_database_if_not_exists()
                 
-                # Create documents table
-                await conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS documents (
-                        id SERIAL PRIMARY KEY,
-                        filename VARCHAR(255) NOT NULL,
-                        content TEXT NOT NULL,
-                        metadata JSONB,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """))
-                
-                # Create embeddings table
-                await conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS embeddings (
-                        id SERIAL PRIMARY KEY,
-                        document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
-                        chunk_text TEXT NOT NULL,
-                        embedding vector(768),  -- nomic-embed-text dimension
-                        chunk_index INTEGER NOT NULL,
-                        metadata JSONB,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """))
-                
-                # Create index for vector similarity search
-                await conn.execute(text("""
-                    CREATE INDEX IF NOT EXISTS embeddings_embedding_idx 
-                    ON embeddings USING ivfflat (embedding vector_cosine_ops)
-                    WITH (lists = 100);
-                """))
-                
-                # Create chat sessions table
-                await conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS chat_sessions (
-                        id SERIAL PRIMARY KEY,
-                        session_id VARCHAR(255) UNIQUE NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """))
-                
-                # Create chat messages table
-                await conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS chat_messages (
-                        id SERIAL PRIMARY KEY,
-                        session_id VARCHAR(255) REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
-                        role VARCHAR(50) NOT NULL,
-                        content TEXT NOT NULL,
-                        metadata JSONB,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """))
-                
-                logger.info("Database initialized successfully")
-                
-        except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
-            raise
+                # Initialize extensions and tables in a single transaction
+                async with self.async_engine.begin() as conn:
+                    # Enable pgvector extension
+                    await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+                    
+                    # Create documents table
+                    await conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS documents (
+                            id SERIAL PRIMARY KEY,
+                            filename VARCHAR(255) NOT NULL,
+                            content TEXT NOT NULL,
+                            metadata JSONB,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """))
+                    
+                    # Create embeddings table
+                    await conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS embeddings (
+                            id SERIAL PRIMARY KEY,
+                            document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
+                            chunk_text TEXT NOT NULL,
+                            embedding vector(768),  -- nomic-embed-text dimension
+                            chunk_index INTEGER NOT NULL,
+                            metadata JSONB,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """))
+                    
+                    # Create index for vector similarity search
+                    await conn.execute(text("""
+                        CREATE INDEX IF NOT EXISTS embeddings_embedding_idx 
+                        ON embeddings USING ivfflat (embedding vector_cosine_ops)
+                        WITH (lists = 100);
+                    """))
+                    
+                    # Create chat sessions table
+                    await conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS chat_sessions (
+                            id SERIAL PRIMARY KEY,
+                            session_id VARCHAR(255) UNIQUE NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """))
+                    
+                    # Create chat messages table
+                    await conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS chat_messages (
+                            id SERIAL PRIMARY KEY,
+                            session_id VARCHAR(255) REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+                            role VARCHAR(50) NOT NULL,
+                            content TEXT NOT NULL,
+                            metadata JSONB,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """))
+                    
+                    # All operations completed successfully
+                    self._initialized = True
+                    logger.info("Database initialized successfully")
+                    
+            except Exception as e:
+                logger.error(f"Failed to initialize database: {e}")
+                raise
     
     async def _create_database_if_not_exists(self) -> None:
         """Create database if it doesn't exist."""
@@ -136,7 +181,7 @@ class DatabaseManager:
         """Insert a document into the database."""
         import json
         
-        async with self.async_session() as session:
+        async with self.get_session() as session:
             result = await session.execute(
                 text("""
                     INSERT INTO documents (filename, content, metadata)
@@ -157,7 +202,7 @@ class DatabaseManager:
         """Insert embeddings into the database."""
         import json
         
-        async with self.async_session() as session:
+        async with self.get_session() as session:
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                 chunk_metadata = metadata[i] if metadata else {}
                 # Format embedding as PostgreSQL vector string
@@ -165,7 +210,7 @@ class DatabaseManager:
                 await session.execute(
                     text("""
                         INSERT INTO embeddings (document_id, chunk_text, embedding, chunk_index, metadata)
-                        VALUES (:document_id, :chunk_text, :embedding::vector, :chunk_index, :metadata)
+                        VALUES (:document_id, :chunk_text, CAST(:embedding AS vector), :chunk_index, :metadata)
                     """),
                     {
                         "document_id": document_id,
@@ -179,7 +224,7 @@ class DatabaseManager:
     
     async def similarity_search(self, query_embedding: List[float], limit: int = 5) -> List[Dict[str, Any]]:
         """Perform similarity search using vector embeddings."""
-        async with self.async_session() as session:
+        async with self.get_session() as session:
             # Format query embedding as PostgreSQL vector string
             query_embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
             result = await session.execute(
@@ -189,19 +234,21 @@ class DatabaseManager:
                         e.metadata,
                         d.filename,
                         d.metadata as doc_metadata,
-                        (e.embedding <=> :query_embedding::vector) as distance
+                        (e.embedding <=> CAST(:query_embedding AS vector)) as distance
                     FROM embeddings e
                     JOIN documents d ON e.document_id = d.id
-                    ORDER BY e.embedding <=> :query_embedding::vector
+                    ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
                     LIMIT :limit
                 """),
                 {"query_embedding": query_embedding_str, "limit": limit}
             )
-            return [dict(row) for row in result.fetchall()]
+            # Convert SQLAlchemy rows to dictionaries properly
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]
     
     async def get_chat_history(self, session_id: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Get chat history for a session."""
-        async with self.async_session() as session:
+        async with self.get_session() as session:
             result = await session.execute(
                 text("""
                     SELECT role, content, metadata, created_at
@@ -212,13 +259,14 @@ class DatabaseManager:
                 """),
                 {"session_id": session_id, "limit": limit}
             )
-            return [dict(row) for row in result.fetchall()]
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]
     
     async def save_chat_message(self, session_id: str, role: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """Save a chat message to the database."""
         import json
         
-        async with self.async_session() as session:
+        async with self.get_session() as session:
             # Ensure session exists
             await session.execute(
                 text("""

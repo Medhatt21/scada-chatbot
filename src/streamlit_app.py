@@ -4,6 +4,9 @@ import asyncio
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import nest_asyncio
 
 import streamlit as st
 from loguru import logger
@@ -13,20 +16,14 @@ from database import db_manager
 from document_processor import document_processor
 from rag_pipeline import rag_pipeline
 
+# Apply nest_asyncio to allow nested event loops
+nest_asyncio.apply()
+
 
 def run_async_safe(coro):
     """Safely run async coroutine in Streamlit."""
     try:
-        # Ensure we're not in an existing event loop
-        try:
-            loop = asyncio.get_running_loop()
-            # If we're already in a loop, we need to handle this differently
-            logger.warning("Already in an event loop, using alternative approach")
-            return None
-        except RuntimeError:
-            # No loop running, safe to use asyncio.run()
-            pass
-        
+        # With nest_asyncio, we can run async operations even in existing event loops
         return asyncio.run(coro)
     except Exception as e:
         logger.error(f"Async operation failed: {e}")
@@ -95,16 +92,24 @@ st.markdown("""
 async def initialize_app():
     """Initialize the application components."""
     try:
-        # Initialize database first
-        await db_manager.initialize_database()
+        logger.info("Starting application initialization...")
+        
+        # Initialize database first with proper error handling
+        try:
+            await db_manager.initialize_database()
+            db_initialized = True
+            logger.info("Database initialization completed")
+        except Exception as db_error:
+            logger.error(f"Database initialization failed: {db_error}")
+            db_initialized = False
         
         # Check Ollama models (with timeout to avoid hanging)
-        import asyncio
         try:
             model_status = await asyncio.wait_for(
                 document_processor.check_ollama_models(), 
-                timeout=10.0
+                timeout=15.0
             )
+            logger.info("Model check completed successfully")
         except asyncio.TimeoutError:
             logger.warning("Ollama model check timed out")
             model_status = {
@@ -113,9 +118,17 @@ async def initialize_app():
                 "available_models": [],
                 "error": "Timeout checking models"
             }
+        except Exception as model_error:
+            logger.error(f"Model check failed: {model_error}")
+            model_status = {
+                "llm_model": False,
+                "embedding_model": False,
+                "available_models": [],
+                "error": str(model_error)
+            }
         
         return {
-            "database_initialized": True,
+            "database_initialized": db_initialized,
             "models_available": model_status
         }
     except Exception as e:

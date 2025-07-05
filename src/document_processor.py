@@ -173,42 +173,54 @@ class DocumentProcessor:
             client = ollama.Client(host=settings.OLLAMA_BASE_URL)
             models_response = client.list()
             
-            # Handle ollama._types.ListResponse and other response structures
+            # Handle different response formats
             available_models = []
             
+            # First, try to extract models from the response
             if hasattr(models_response, 'models'):
                 # This is likely an ollama._types.ListResponse object
-                for model in models_response.models:
-                    if hasattr(model, 'name') and model.name:
-                        available_models.append(model.name)
-                    elif isinstance(model, dict) and model.get('name'):
-                        available_models.append(model['name'])
+                models_list = models_response.models
             elif isinstance(models_response, dict) and 'models' in models_response:
                 # Traditional dict response
-                available_models = [model.get('name', '') for model in models_response['models'] if model.get('name')]
+                models_list = models_response['models']
             elif isinstance(models_response, list):
                 # Direct list response
-                available_models = [model.get('name', '') for model in models_response if model.get('name')]
+                models_list = models_response
             else:
-                logger.warning(f"Unexpected models response format: {type(models_response)}")
-                # Try to convert to dict and extract models
-                try:
-                    if hasattr(models_response, '__dict__'):
-                        response_dict = models_response.__dict__
-                        if 'models' in response_dict:
-                            for model in response_dict['models']:
-                                if hasattr(model, 'name'):
-                                    available_models.append(model.name)
-                except Exception as convert_error:
-                    logger.error(f"Failed to convert response: {convert_error}")
+                # Try to convert to dict if it has __dict__
+                if hasattr(models_response, '__dict__'):
+                    response_dict = models_response.__dict__
+                    models_list = response_dict.get('models', [])
+                else:
+                    logger.warning(f"Unexpected models response format: {type(models_response)}")
+                    models_list = []
             
-            # Filter out empty names
-            available_models = [name for name in available_models if name]
+            # Extract model names from the list
+            for model in models_list:
+                if hasattr(model, 'name') and model.name:
+                    available_models.append(model.name)
+                elif hasattr(model, 'model') and model.model:  # Sometimes it's stored as 'model'
+                    available_models.append(model.model)
+                elif isinstance(model, dict):
+                    # Handle dictionary format
+                    name = model.get('name') or model.get('model')
+                    if name:
+                        available_models.append(name)
+                elif isinstance(model, str):
+                    # Handle string format
+                    available_models.append(model)
+            
+            # Filter out empty names and clean up
+            available_models = [name.strip() for name in available_models if name and name.strip()]
             logger.info(f"Available Ollama models: {available_models}")
             
+            # Check if our required models are available
+            llm_available = any(settings.OLLAMA_LLM_MODEL in model for model in available_models)
+            embedding_available = any(settings.OLLAMA_EMBEDDING_MODEL in model for model in available_models)
+            
             return {
-                "llm_model": settings.OLLAMA_LLM_MODEL in available_models,
-                "embedding_model": settings.OLLAMA_EMBEDDING_MODEL in available_models,
+                "llm_model": llm_available,
+                "embedding_model": embedding_available,
                 "available_models": available_models
             }
         except Exception as e:
