@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     
     # Ollama settings
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_LLM_MODEL: str = "llama3.1:8b"  # Lightweight model
+    OLLAMA_LLM_MODEL: str = "llama3.2:3b"  # Very lightweight model for memory-constrained systems
     OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text"  # Lightweight embedding model
     
     # Application settings

@@ -58,15 +58,16 @@ class DatabaseManager:
                 if session:
                     try:
                         await session.rollback()
-                    except:
-                        pass
+                    except Exception as rollback_error:
+                        logger.warning(f"Failed to rollback session: {rollback_error}")
                 logger.error(f"Database session error: {e}")
                 raise
             finally:
                 if session:
                     try:
                         await session.close()
-                    except:
+                    except Exception as close_error:
+                        logger.warning(f"Failed to close session: {close_error}")
                         pass
     
     async def initialize_database(self) -> None:
@@ -195,7 +196,6 @@ class DatabaseManager:
                 }
             )
             document_id = result.fetchone()[0]
-            await session.commit()
             return document_id
     
     async def insert_embeddings(self, document_id: int, chunks: List[str], embeddings: List[List[float]], metadata: Optional[List[Dict[str, Any]]] = None) -> None:
@@ -220,7 +220,6 @@ class DatabaseManager:
                         "metadata": json.dumps(chunk_metadata) if chunk_metadata else None
                     }
                 )
-            await session.commit()
     
     async def similarity_search(self, query_embedding: List[float], limit: int = 5) -> List[Dict[str, Any]]:
         """Perform similarity search using vector embeddings."""
@@ -290,7 +289,6 @@ class DatabaseManager:
                     "metadata": json.dumps(metadata) if metadata else None
                 }
             )
-            await session.commit()
     
     async def close(self) -> None:
         """Close database connections."""

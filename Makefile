@@ -76,8 +76,8 @@ status:
 # Pull required Ollama models
 models:
 	@echo "📥 Pulling required Ollama models..."
-	@echo "🤖 Pulling LLM model: llama3.1:8b"
-	@docker exec -it scada_chatbot_ollama ollama pull llama3.1:8b || true
+	@echo "🤖 Pulling LLM model: llama3.2:3b"
+	@docker exec -it scada_chatbot_ollama ollama pull llama3.2:3b || true
 	@echo "🧠 Pulling embedding model: nomic-embed-text"
 	@docker exec -it scada_chatbot_ollama ollama pull nomic-embed-text || true
 	@echo "✅ Models pulled successfully!"
@@ -158,7 +158,7 @@ info:
 	@echo "  - User: postgres"
 	@echo ""
 	@echo "🤖 Ollama Models:"
-	@echo "  - LLM: llama3.1:8b"
+	@echo "  - LLM: llama3.2:3b"
 	@echo "  - Embeddings: nomic-embed-text"
 	@echo ""
 	@echo "📁 Data Directories:"

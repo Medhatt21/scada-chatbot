@@ -47,7 +47,7 @@ services:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
       - OLLAMA_BASE_URL=http://ollama:11434
-      - OLLAMA_MODEL=llama3.1:8b
+      - OLLAMA_MODEL=llama3.2:3b
       - OLLAMA_EMBEDDING_MODEL=nomic-embed-text
     ports:
       - "8501:8501"

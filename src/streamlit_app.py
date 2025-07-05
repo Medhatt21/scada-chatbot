@@ -3,7 +3,7 @@
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import nest_asyncio
@@ -19,16 +19,90 @@ from rag_pipeline import rag_pipeline
 # Apply nest_asyncio to allow nested event loops
 nest_asyncio.apply()
 
+# Create a dedicated thread pool for async operations
+_async_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="async_ops")
+_async_loop = None
+_loop_lock = threading.Lock()
+
+def get_or_create_async_loop():
+    """Get or create a dedicated async loop for database operations."""
+    global _async_loop
+    with _loop_lock:
+        if _async_loop is None or _async_loop.is_closed():
+            _async_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(_async_loop)
+        return _async_loop
 
 def run_async_safe(coro):
-    """Safely run async coroutine in Streamlit."""
+    """Safely run async coroutine in Streamlit with proper event loop handling."""
     try:
-        # With nest_asyncio, we can run async operations even in existing event loops
-        return asyncio.run(coro)
+        # Try to get the current event loop
+        try:
+            loop = asyncio.get_running_loop()
+            # If we're in an existing loop, create a task
+            if loop.is_running():
+                import concurrent.futures
+                future = concurrent.futures.Future()
+                
+                def run_in_executor():
+                    try:
+                        new_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(new_loop)
+                        try:
+                            result = new_loop.run_until_complete(coro)
+                            future.set_result(result)
+                        finally:
+                            new_loop.close()
+                    except Exception as e:
+                        future.set_exception(e)
+                
+                _async_executor.submit(run_in_executor)
+                return future.result(timeout=30)  # 30 second timeout
+            else:
+                return loop.run_until_complete(coro)
+        except RuntimeError:
+            # No event loop running, create a new one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
     except Exception as e:
         logger.error(f"Async operation failed: {e}")
-        return None
+        # Return a structured error response for better handling
+        if "memory" in str(e).lower():
+            return {
+                "error": "memory_insufficient",
+                "message": "Insufficient memory to run the language model. Please try a smaller model or increase available memory.",
+                "details": str(e)
+            }
+        elif "event loop" in str(e).lower() or "attached to a different loop" in str(e):
+            return {
+                "error": "async_conflict", 
+                "message": "Internal async operation conflict. Please try your question again.",
+                "details": str(e)
+            }
+        else:
+            return {
+                "error": "general",
+                "message": f"Operation failed: {str(e)}",
+                "details": str(e)
+            }
 
+def handle_async_error(result):
+    """Handle async operation results and display appropriate errors."""
+    if isinstance(result, dict) and "error" in result:
+        error_type = result["error"]
+        if error_type == "memory_insufficient":
+            st.error("🧠 **Memory Issue**: The language model requires more memory than available. Try asking simpler questions or wait for system resources to free up.")
+            st.info("💡 **Tip**: The embeddings and document retrieval work fine. Only the final answer generation requires more memory.")
+        elif error_type == "async_conflict":
+            st.error("⚙️ **System Issue**: Internal operation conflict. Please try your question again.")
+        else:
+            st.error(f"❌ **Error**: {result['message']}")
+        return True
+    return False
 
 # Configure Streamlit page
 st.set_page_config(
@@ -282,20 +356,23 @@ def main_chat_interface():
                 rag_pipeline.query(query, session_id=st.session_state.session_id)
             )
             
-            if response:
-                # Create assistant message
+            # Handle async errors first
+            if handle_async_error(response):
+                # Error was handled and displayed, don't process further
+                pass
+            elif response and isinstance(response, dict) and "answer" in response:
+                # Success case
                 assistant_message = {
                     "role": "assistant",
                     "content": response['answer'],
-                    "sources": response['sources'],
-                    "metadata": response['metadata']
+                    "sources": response.get('sources', []),
+                    "metadata": response.get('metadata', {})
                 }
                 
                 st.session_state.messages.append(assistant_message)
-                
-                # Display assistant message
                 display_chat_message(assistant_message, is_user=False)
             else:
+                # General failure case
                 error_message = {
                     "role": "assistant",
                     "content": "I apologize, but I encountered an error processing your query. Please make sure Ollama is running and the required models are available.",
